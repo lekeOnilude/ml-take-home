@@ -1,4 +1,6 @@
 import transformers as tr
+import torch
+import torch.nn.functional as F
 
 amateur_path = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 expert_path = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
@@ -38,6 +40,21 @@ prompt = tokenizer.apply_chat_template(
     tokenize=False,
 )
 
+def load_model(model_name):
+    model = tr.AutoModelForCausalLM.from_pretrained(
+        model_name,
+		torch_dtype=torch.float16,
+		device_map="auto",
+		trust_remote_code=True
+	)
+    return model
 
 def contrastive_generation(amateur, expert, prompt, max_tokens) -> str:
     return ""
+
+
+def main(amateur_path, expert_path):
+    amateur_model = load_model(amateur_path)
+    expert_model = load_model(expert_path)
+    
+	
