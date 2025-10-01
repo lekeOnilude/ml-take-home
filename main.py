@@ -3,57 +3,20 @@ import torch
 import torch.nn.functional as F
 from typing import Optional
 
-amateur_path = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
-expert_path = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
-
-tokenizer = tr.AutoTokenizer.from_pretrained(amateur_path)
-
-user_message = """Give a very very brief docstring for the following function:\n```\nfunction updateEloScores(
-	scores,
-	results,
-	kFactor = 4,
-) {
-	for (const result of results) {
-		const { first, second, outcome } = result;
-		const firstScore = scores[first] ?? 1000;
-		const secondScore = scores[second] ?? 1000;
-
-		const expectedScoreFirst = 1 / (1 + Math.pow(10, (secondScore - firstScore) / 400));
-		const expectedScoreSecond = 1 / (1 + Math.pow(10, (firstScore - secondScore) / 400));
-		let sa = 0.5;
-		if (outcome === 1) {
-			sa = 1;
-		} else if (outcome === -1) {
-			sa = 0;
-		}
-		scores[first] = firstScore + kFactor * (sa - expectedScoreFirst);
-		scores[second] = secondScore + kFactor * (1 - sa - expectedScoreSecond);
-	}
-	return scores;
-}\n```"""
-
-prompt = tokenizer.apply_chat_template(
-    [
-        {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": user_message},
-    ],
-    add_generation_prompt=True,
-    tokenize=False,
-)
-
 def load_model(model_name):
     model = tr.AutoModelForCausalLM.from_pretrained(
         model_name,
-		torch_dtype=torch.float16,
-		device_map="auto",
-		trust_remote_code=True
-	)
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True
+        )
     return model
 
 def contrastive_generation(
-    amateur_model, 
-    expert_model, 
-    prompt: str, 
+    amateur_model,
+    expert_model,
+    tokenizer,
+    prompt: str,
     max_tokens: int,
     alpha: float = 1.0,
     temperature: float = 1.0,
@@ -62,33 +25,33 @@ def contrastive_generation(
 ) -> str:
     """
     Implements token-level contrastive decoding.
-    
+
     Args:
         amateur_model: The smaller/weaker model
-        expert_model: The larger/stronger model  
+        expert_model: The larger/stronger model
         prompt: Input text prompt
         max_tokens: Maximum number of tokens to generate
-        alpha: Adaptive plausibility constraint 
+        alpha: Adaptive plausibility constraint
         temperature: Sampling temperature
         top_k: Top-k sampling parameter
         top_p: Top-p (nucleus) sampling parameter
-    
+
     Returns:
         Generated text string
     """
     device = next(expert_model.parameters()).device
-    
+
     # Tokenize the prompt
     inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
-    
+
     generated_tokens = input_ids.clone()
-    
+
     # Initialize past key values for caching
     amateur_past_key_values = None
     expert_past_key_values = None
-    
+
     with torch.no_grad():
         for step in range(max_tokens):
             # For the first step, use the full sequence; for subsequent steps, use only the last token
@@ -127,7 +90,7 @@ def contrastive_generation(
             # Get the logits for the last token
             amateur_logits = amateur_outputs.logits[:, -1, :]  # [batch_size, vocab_size]
             expert_logits = expert_outputs.logits[:, -1, :]    # [batch_size, vocab_size]
-        
+
 
 
             expert_log_probs = F.log_softmax(expert_logits, dim=-1)
@@ -145,8 +108,6 @@ def contrastive_generation(
             # Calculate CD-Score (log P_EXP - log P_AMA_temp)
             # CD-score(x_i) = log P_EXP(x_i) - log P_AMA_tau(x_i)
             contrastive_logits = expert_log_probs - amateur_log_probs # [batch_size, vocab_size]
-
-            print(f"contrastive_logits shape: {contrastive_logits.shape}")
 
             # Apply the Plausibility Mask
             # Tokens failing the constraint get a score of -inf
@@ -198,17 +159,82 @@ def contrastive_generation(
 
             # Append the new token
             generated_tokens = torch.cat([generated_tokens, next_token], dim=-1)
-    
+
     # Decode the generated tokens (excluding the original prompt)
     generated_text = tokenizer.decode(
-        generated_tokens[0, input_ids.shape[1]:], 
+        generated_tokens[0, input_ids.shape[1]:],
         skip_special_tokens=True
     )
-    
+
+    return generated_text
+
+def create_prompt(tokenizer):
+    user_message = """Give a very very brief docstring for the following function:\n```\nfunction updateEloScores(
+        scores,
+        results,
+        kFactor = 4,
+) {
+        for (const result of results) {
+                const { first, second, outcome } = result;
+                const firstScore = scores[first] ?? 1000;
+                const secondScore = scores[second] ?? 1000;
+
+                const expectedScoreFirst = 1 / (1 + Math.pow(10, (secondScore - firstScore) / 400));
+                const expectedScoreSecond = 1 / (1 + Math.pow(10, (firstScore - secondScore) / 400));
+                let sa = 0.5;
+                if (outcome === 1) {
+                        sa = 1;
+                } else if (outcome === -1) {
+                        sa = 0;
+                }
+                scores[first] = firstScore + kFactor * (sa - expectedScoreFirst);
+                scores[second] = secondScore + kFactor * (1 - sa - expectedScoreSecond);
+        }
+        return scores;
+}\n```"""
+
+    prompt = tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": user_message},
+        ],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+
+    return prompt
+
+def main(amateur_path, expert_path, prompt, tokenizer):
+    amateur_model = load_model(amateur_path)
+    expert_model = load_model(expert_path)
+
+    generated_text = contrastive_generation(
+        amateur_model,
+        expert_model,
+        tokenizer,
+        prompt=prompt,
+        max_tokens=50,
+        alpha=0.1,
+        temperature=0.8,
+        top_p=0.9
+    )
+
     return generated_text
 
 
-def main(amateur_path, expert_path):
-    amateur_model = load_model(amateur_path)
-    expert_model = load_model(expert_path)
+if __name__ == "__main__":
     
+	amateur_path = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+	expert_path = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+
+	tokenizer = tr.AutoTokenizer.from_pretrained(amateur_path)
+
+	# Create prompt
+	prompt = create_prompt(tokenizer)
+
+	# Call the main function
+	generated_output = main(amateur_path, expert_path, prompt, tokenizer)
+
+	# Print the generated output
+	print("Generated Output:")
+	print(generated_output)
